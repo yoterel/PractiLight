@@ -76,9 +76,3 @@ def render_direct_light(depth_image_path, dst_path, randcolor=False, hints=False
             dir_output_node.file_slots[0].path = str(cur_hint_path.stem)
             bpy.ops.render.render()
     bpy.data.objects.remove(pseudo_scene)
-
-if __name__ == "__main__":
-    src = Path("output/inference/tokyo_manual/disp_norm_00_00_00.png")
-    for i in range(5):
-        dst = Path("renders", "{:02}_.png".format(i))
-        render_direct_light(src, dst)

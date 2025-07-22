@@ -1,29 +1,31 @@
 output_dir: "output/test"
 pretrained_model_name_or_path: "stable-diffusion-v1-5/stable-diffusion-v1-5"
 cache_dir: "/CT/ObjectInjection/work/light_transport_diffuse/models"
+control_signal: ./output/test/control.png
 seed: 8
-mixed_precision: null # ["no", "fp16", "bf16"]
+mode: null
 device: "cuda:0"
 cfg_scale: 8.5
 prompt: "a silver teapot on a wooden table. intricate."
 prompt_negative: "artifacts, slow, ugly, blurry, deformed, multiple limbs, pixelated, static, fog, flat, unclear, distorted, error, still, low resolution, oversaturated, grain, blur, morhping, warping"
 num_steps: 100
-folder_to_load_lora_checkpoint: ["/CT/ObjectInjection/work/light_transport_diffuse/train/images_41441201"]
+folder_to_load_lora_checkpoint: ["/CT/ObjectInjection/work/light_transport_diffuse/output/train/images_41441201"]
 lora_checkpoint_index: [-1]  # -1 for using latest checkpoint
 lora_guidance_scale: 2.0  # scale for guidance
 adaptive_guidance: False
 lora_timestamp_cutoff: [0.05, 0.5]
 norm_gradients: True
-controlnet_timestamp_cutoff: [0.05, 0.85]
+controlnet_t: [0.05, 0.85]
 controlnet_guidance_scale: 0.75
 lora_iter_per_timestep: 1
 batch_size: 1
-store_timestamp_cutoff: [0.0, 0.75]
-inference_store_attention_value: "query"  # query, key, value, weight
+inject_t: [0.0, 0.75]
+inject_value: "query"  # query, key, value, weight
 # "d00", "d01", "d10", "d11", "d20", "d21",
 # "m00",
 # "u10", "u11", "u12", "u20", "u21", "u22", "u30", "u31", "u32"
-inference_store_attention_layers: ["u10", "u11", "u12", "u20", "u21", "u22", "u30", "u31", "u32"]
+inject_layers: ["u10", "u11", "u12", "u20", "u21", "u22", "u30", "u31", "u32"]
 force_create_guidance: False
 lora_output_timesteps: null
 return_intermeds_timesteps: null
+mixed_precision: null # ["no", "fp16", "bf16"]

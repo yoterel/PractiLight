@@ -3,10 +3,24 @@ import yaml
 import numpy as np
 import torch
 import shutil
-from pipline_practilight import PLPipeline, register_attention_control, AttentionStore
-
+from pathlib import Path
+from PIL import Image
+import cv2
+from diffusers import (
+    DDIMScheduler,
+    ControlNetModel,
+)
+from torchvision import transforms
+from intrinsic.pipeline import load_models as intrinsic_load_models
+from intrinsic.pipeline import run_pipeline as intrinsic_run_pipeline
+from pipeline_practilight import PLPipeline, register_attention_control, AttentionStore
+import gsoup
+from utils import color_transfer, image_to_depth
 
 def parse_command_line():
+    """
+    parses command line option, preferrably everything is in a YAML file (config)
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to config file")
     parser.add_argument("--prompt", type=str, help="prompt")
@@ -35,9 +49,19 @@ def parse_command_line():
     )
     parser.add_argument("--device", type=str, help="device to use (cuda:0, cpu, etc)")
     args = parser.parse_args()
+    return args
 
+class Struct:
+    """
+    used to convert a dictionary to struct
+    """
+    def __init__(self, **entries):
+        self.__dict__.update(entries)
 
 def override_config(config, args):
+    """
+    allow overriding some configurations with command line options
+    """
     if args.prompt is not None:
         config["prompt"] = args.prompt
     if args.n_prompt is not None:
@@ -74,27 +98,26 @@ def override_config(config, args):
 
 
 def main():
-    # 1. Parse CLI arguments
-    args = parse_command_line()
-
-    # 2. Load YAML config
-    with open(args.config, "r") as f:
+    # parse CLI arguments / YAML config
+    pargs = parse_command_line()
+    with open(pargs.config, "r") as f:
         config = yaml.safe_load(f)
-
-    # 3. Override YAML config with CLI args if provided
-    args = override_config(config, args)
+    
+    # override YAML config with CLI args if provided
+    args = override_config(config, pargs)
+    args = Struct(**config)
     torch.hub.set_dir(str(args.cache_dir))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # 4. load models
+    # load models
     if args.mixed_precision:
         weight_dtype = torch.float16
     else:
         weight_dtype = torch.float32
     controlnet = ControlNetModel.from_pretrained(
         "lllyasviel/sd-controlnet-canny",
-        torch_dtype=torch.float16,
+        torch_dtype=weight_dtype,
         cache_dir=args.cache_dir,
     )
     albedo_model = intrinsic_load_models("v2")
@@ -112,6 +135,7 @@ def main():
     pipeline.enable_model_cpu_offload()
     # pipeline.set_progress_bar_config(disable=True)
     generator = torch.Generator(device=args.device)
+
     # fetch latest lora weights
     lora_names = []
     for i, lora_exp_checkpoint in enumerate(args.folder_to_load_lora_checkpoint):
@@ -135,20 +159,20 @@ def main():
     if len(adapters) != 0:
         pipeline.set_adapters(lora_names, adapter_weights=[0.0] * len(lora_names))
 
-    # 5. set seed
+    # set seed
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
     torch.manual_seed(args.seed)
     adapters = pipeline.get_active_adapters()
 
-    # 6. set custom processor to save attention
+    # set custom processor to save attention
     attention_store = AttentionStore(args)
     register_attention_control(
         pipeline, args, default=False, attention_store=attention_store
     )
-
+    # generate image to relight from seed
     attention_store.reset()
     gen_state = generator.get_state()
-    no_lora_images, lora_readout, _ = pipeline(
+    orig_images, lora_readouts, _ = pipeline(
         prompt=[args.prompt] * args.batch_size,
         negative_prompt=[args.prompt_negative] * args.batch_size,
         num_inference_steps=args.num_steps,
@@ -160,41 +184,74 @@ def main():
         lora_output_timestep=-1,
         attention_store=attention_store,
     )
+    lora_readout = gsoup.to_8b(lora_readouts[0])
+    orig_image = gsoup.to_8b(orig_images[0])
+    gsoup.save_image(orig_image, Path(output_dir, "original.png"))
+    gsoup.save_image(lora_readout, Path(output_dir, "original_readout.png"))
+    control_signal_valid = False
+    if args.control_signal is not None:
+        if Path(args.control_signal).exists():
+           control_signal_valid = True
 
-    no_lora_images = gsoup.to_8b(no_lora_images)
-    # albedo
-    results = intrinsic_run_pipeline(albedo_model, gsoup.to_float(no_lora_images[0]))
+    if control_signal_valid:
+        # preprocess control signal
+        image_transforms = transforms.Compose(
+            [
+                transforms.Resize(512, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(512),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+        control_signal_image = gsoup.load_image(Path(args.control_signal))
+        if control_signal_image.shape[-1] == 1:
+            control_signal_image = np.tile(control_signal_image, (1, 1, 3))
+        control_signal_image = gsoup.color_to_gray(control_signal_image, keep_channels=True)
+        control_signal_pil = Image.fromarray(control_signal_image)
+        lora_target = image_transforms(control_signal_pil)
+        lora_target = lora_target.repeat(args.batch_size, 1, 1, 1)
+        lora_target_embeds = pipeline.vae.encode(lora_target.to(dtype=weight_dtype, device=args.device)).latent_dist.sample()
+        lora_target_embeds = lora_target_embeds * pipeline.vae.config.scaling_factor
+        lora_target_embeds = [lora_target_embeds]
+    else:
+        print("Control signal not provided, generating depth map for proxy scene.")
+        depth, depth_model = image_to_depth(orig_image[None, ...], args, None)
+        disparity = 1 / (depth[0] + 1e-5)
+        disparity_normalized = gsoup.map_to_01(disparity)
+        gsoup.save_image(disparity_normalized, Path(output_dir, "proxy.png"))
+        # gsoup.save_image(orig_image, Path(output_dir, "orig.png")
+        print("saved at: {}. open booth.blend with Blender to create a control signal.".format(Path(output_dir, "proxy.png")))
+        return
+    # prepare controlnet edge map
+    # prepare albedo map
+    results = intrinsic_run_pipeline(albedo_model, gsoup.to_float(orig_image))
     albedo = results["hr_alb"]
     albedo = np.clip(albedo, 0, 1)
     albedo = gsoup.to_8b(albedo)
     albedo = Image.fromarray(albedo).resize((512, 512))
     image_for_canny = np.array(albedo)
-    # edge map
+    # prepare albedo edge map
     low_threshold = 100
     high_threshold = 200
     image = cv2.Canny(image_for_canny, low_threshold, high_threshold)
     image = image[:, :, None]
     control_image = np.concatenate([image, image, image], axis=2)
-
     control_image = Image.fromarray(control_image)
-    # control image 2
+    # prepare control edge map
     low_threshold = 100
     high_threshold = 200
-    image = cv2.Canny(guidance_image[0], low_threshold, high_threshold)
+    image = cv2.Canny(control_signal_image, low_threshold, high_threshold)
     image = image[:, :, None].astype(bool)
-    combine = True
-    if combine:
-        control_image_orig = np.array(control_image)[:, :, 0:1].astype(bool)
-        control_image_new = control_image_orig | image
-    else:
-        control_image_new = image
+    # merge edge maps
+    control_image_orig = np.array(control_image)[:, :, 0:1].astype(bool)
+    control_image_new = control_image_orig | image
     control_image_new = control_image_new.astype(np.uint8) * 255
     control_image_np = np.concatenate(
         [control_image_new, control_image_new, control_image_new], axis=2
     )
+    gsoup.save_image(control_image_np, Path(output_dir, "controlnet_input.png"))
     control_image_pil = Image.fromarray(control_image_np)
-    control_images.append(control_image_np)
-    # 10. relight
+    # relight
     attention_store.freeze = True
     generator.set_state(gen_state)
     result, final_lora_readout, intermeds = pipeline(
@@ -203,13 +260,13 @@ def main():
         num_inference_steps=args.num_steps,
         generator=generator,
         guidance_scale=args.cfg_scale,
-        latents=inverted_latents,
+        latents=None,
         lora_guidance_scale=args.lora_guidance_scale,
-        lora_target=labels_embeds,
+        lora_target=lora_target_embeds,
         output_type="np",
         control_image=control_image_pil,
-        control_guidance_start=args.controlnet_timestamp_cutoff[0],
-        control_guidance_end=args.controlnet_timestamp_cutoff[1],
+        control_guidance_start=args.controlnet_t[0],
+        control_guidance_end=args.controlnet_t[1],
         controlnet_conditioning_scale=args.controlnet_guidance_scale,
         lora_output_timestep=args.lora_output_timesteps,
         lora_timestamp_cutoff=args.lora_timestamp_cutoff,
@@ -220,25 +277,20 @@ def main():
         return_intermeds_timesteps=args.return_intermeds_timesteps,
         return_dict=False,
     )
-    # 11. post process color correction
-    cc = []
-    if len(lora_images) == len(guidance_images):  # sanity check for correcting color
-        for iii in range(len(lora_images)):
-            cur_guide = guidance_images[iii][0]
-            cur_relit = lora_images[iii][0]
-            orig = no_lora_images[0]  # assumes batch size 1
-            r_equals_b = np.all(cur_guide[..., 0] == cur_guide[..., 1])
-            b_equals_g = np.all(cur_guide[..., 1] == cur_guide[..., 2])
-            if r_equals_b and b_equals_g:
-                color_corrected = color_transfer(
-                    orig, cur_relit, clip=True, preserve_paper=False
-                )
-            else:
-                color_corrected = color_transfer(
-                    cur_guide, cur_relit, clip=True, preserve_paper=False
-                )
-            cc.append(color_corrected)
-    # 12. save results
+    result = gsoup.to_8b(result[0])
+    gsoup.save_image(result, Path(output_dir, "relit_raw.png"))
+    final_lora_readouts = []
+    intermediates = []
+    if final_lora_readout is not None:
+        for readout in final_lora_readout:
+            final_lora_readouts.append(gsoup.to_8b(readout))
+    if intermeds is not None:
+        for intermed in intermeds:
+            intermediates.append(gsoup.to_8b(intermed))
+    # post process color correction
+    color_corrected = color_transfer(orig_image, result, clip=True, preserve_paper=False)
+    # save results
+    gsoup.save_image(color_corrected, Path(output_dir, "relit.png"))
 
 
 if __name__ == "__main__":

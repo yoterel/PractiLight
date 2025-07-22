@@ -68,13 +68,7 @@ from diffusers.pipelines.stable_diffusion.safety_checker import (
 from math import sqrt
 from collections import defaultdict
 import numpy as np
-from matplotlib import pyplot as plt
-from PIL import Image, ImageDraw
-from pathlib import Path
-import gsoup
 import torchvision.transforms.functional as TF
-from ddpm_inversion import reverse_step
-from sklearn.decomposition import PCA
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -181,219 +175,6 @@ def register_attention_control(pipeline, args, default=True, attention_store=Non
             attention_store.num_att_layers = att_count
 
 
-class HookRoutine:
-    def __init__(self, model, output_dir, subset_heads=None):
-        # gather all relevant layer names
-        self.valid_names_res = []
-        self.valid_names_att = []
-        self.valid_names_crossatt = []
-        self.valid_names_conv = []
-        self.hooks = []
-        self.model = model
-        self.mode = "save"
-        self.subset_heads = subset_heads
-        self.cur_layer = 0
-        self.cur_type = 0
-        for name, layer in self.model.named_modules():
-            if "resnets" in name:
-                if isinstance(layer, ResnetBlock2D):
-                    self.valid_names_res.append(name)
-            elif "downsamplers" in name:
-                if isinstance(layer, torch.nn.modules.conv.Conv2d):
-                    self.valid_names_conv.append(name)
-            elif "upsamplers" in name:
-                if isinstance(layer, torch.nn.modules.conv.Conv2d):
-                    self.valid_names_conv.append(name)
-            else:
-                if self.subset_heads is not None:
-                    valid_layers = [
-                        "attn1.to_k",
-                        "attn1.to_q",
-                        "attn1.to_v",
-                        "attn1.to_out.0",
-                    ]
-                    test = [name.endswith(x) for x in valid_layers]
-                    if np.any(test):
-                        self.valid_names_att.append(name)
-                else:
-                    if name.endswith("attn1"):
-                        self.valid_names_att.append(name)
-                    elif name.endswith("attn2"):
-                        self.valid_names_crossatt.append(name)
-        myfile = Path(output_dir, "res_blocks_names.txt")
-        if not myfile.exists():
-            with open(myfile, "w") as f:
-                for line in self.valid_names_res:
-                    f.write(f"{line}\n")
-        myfile = Path(output_dir, "att_blocks_names.txt")
-        if not myfile.exists():
-            with open(myfile, "w") as f:
-                for line in self.valid_names_att:
-                    f.write(f"{line}\n")
-        myfile = Path(output_dir, "cross_att_blocks_names.txt")
-        if not myfile.exists():
-            with open(myfile, "w") as f:
-                for line in self.valid_names_crossatt:
-                    f.write(f"{line}\n")
-        myfile = Path(output_dir, "conv_blocks_names.txt")
-        if not myfile.exists():
-            with open(myfile, "w") as f:
-                for line in self.valid_names_conv:
-                    f.write(f"{line}\n")
-        # print("residual blocks names:")
-        # print(self.valid_names_res)
-        # print("self attention blocks names:")
-        # print(self.valid_names_att)
-        # print("convolutional blocks names:")
-        # print(self.valid_names_conv)
-        self.activations = []
-
-    def set_hooks(self, args):
-        if self.mode == "save":
-            self.remove_hooks()
-            for name, layer in self.model.named_modules():
-                if args.hook_specific_layer is not None:
-                    if name in args.hook_specific_layer:
-                        print("hooking for save: {}".format(name), flush=True)
-                        self.hooks.append(
-                            layer.register_forward_hook(
-                                lambda *args, **kwargs: HookRoutine.save_activations(
-                                    self, *args, **kwargs
-                                )
-                            )
-                        )
-                else:
-                    if args.hook_type == "res":
-                        if name in self.valid_names_res:
-                            print("hooking for save: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.save_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-                    elif args.hook_type == "att":
-                        if name in self.valid_names_att:
-                            print("hooking for save: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.save_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-                    if args.hook_type == "conv":
-                        if name in self.valid_names_conv:
-                            print("hooking for save: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.save_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-            self.activations = []
-        elif self.mode == "load":
-            self.remove_hooks()
-            for name, layer in self.model.named_modules():
-                if args.hook_specific_layer is not None:
-                    if name in args.hook_specific_layer:
-                        print("hooking for load: {}".format(name), flush=True)
-                        self.hooks.append(
-                            layer.register_forward_hook(
-                                lambda *args, **kwargs: HookRoutine.load_activations(
-                                    self, *args, **kwargs
-                                )
-                            )
-                        )
-                else:
-                    if args.hook_type == "res":
-                        if name in self.valid_names_res:
-                            print("hooking for load: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.load_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-                    elif args.hook_type == "att":
-                        if name in self.valid_names_att:
-                            print("hooking for load: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.load_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-                    if args.hook_type == "conv":
-                        if name in self.valid_names_conv:
-                            print("hooking for load: {}".format(name))
-                            self.hooks.append(
-                                layer.register_forward_hook(
-                                    lambda *args, **kwargs: HookRoutine.load_activations(
-                                        self, *args, **kwargs
-                                    )
-                                )
-                            )
-        else:
-            raise NotImplementedError
-
-    def remove_hooks(self):
-        for hook in self.hooks:
-            hook.remove()
-
-    def set_mode(self, mode):  # "save" or "load"
-        self.mode = mode
-
-    def save_activations(self, module, input, output):
-        # print("hook for saving called.")
-        # print("shape: {}".format(output.shape))
-        # print(module)
-        # if type(output) == tuple:
-        #     self.activations.append((x.detach().cpu() for x in output))
-        # else:
-        self.activations.append(output.detach().cpu())
-        # print("length of activations: {}".format(len(self.activations)))
-
-    def load_activations(self, module, input, output):
-        # print("hook for loading called.")
-        # print("shape: {}".format(output.shape))
-        # if type(output) == tuple:
-        #     tmp_output = self.activations.pop(0)
-        #     new_output = (x.to(output.device) for x in tmp_output)
-        # else:
-        if self.subset_heads is not None:
-            # breakpoint()
-            tmp_output = self.activations.pop(0).to(
-                output.device
-            )  # 1, seq , features (320)
-            tmp_output = tmp_output.reshape(
-                tmp_output.shape[0], tmp_output.shape[1], tmp_output.shape[2] // 8, 8
-            )
-            new_output = output.reshape(
-                output.shape[0], output.shape[1], output.shape[2] // 8, 8
-            )
-            new_output[..., self.subset_heads[self.cur_layer]] = tmp_output[
-                ..., self.subset_heads[self.cur_layer]
-            ]
-            new_output = new_output.reshape(
-                new_output.shape[0], new_output.shape[1], -1
-            )
-            self.cur_type = self.cur_type + 1
-            if self.cur_type == 4:
-                self.cur_type = 0
-                self.cur_layer = (
-                    self.cur_layer + 1
-                ) % 16  # reset when all layers are done
-        else:
-            new_output = self.activations.pop(0).to(output.device)
-        # print("length of activations: {}".format(len(self.activations)))
-        return new_output
-
-
 class AttentionStore:
     def __init__(self, args):
         """
@@ -401,13 +182,12 @@ class AttentionStore:
         """
         self.cur_layer_step = 0
         self.num_att_layers = -1
-        self.save_layer_names = args.inference_store_attention_layers
-        self.valid_step_range = args.inference_store_timestamp_cutoff
+        self.save_layer_names = args.inject_layers
+        self.valid_step_range = args.inject_t
         self.cur_att_layer = 0
         self.curr_timestep = 0
         self.curr_timestep_index = 0
-        self.avg_heads = False  # args.inference_output_type == "attmaps"
-        self.only_pos_prompt = args.inference_output_type == "attmaps"
+        self.avg_heads = False
         # self.save_global_store = False
         # self.global_dict = self.get_empty_store()
         self.attention_store = self.get_empty_store()
@@ -432,7 +212,7 @@ class AttentionStore:
                 if self.cur_att_layer == self.num_att_layers:
                     self.cur_att_layer = 0
                     self.cur_layer_step += 1
-                    self.between_steps()
+                    # self.between_steps()
 
     def forward(self, attn, layer_name, save_cross):
         # parse layer name into short info
@@ -448,15 +228,6 @@ class AttentionStore:
             )  # (2*b, h, height*width, f)
             attn = attn.mean(dim=1, keepdim=True)  # (2*b,1, hxw,f)
             attn = attn[attn.shape[0] // 2 :, :, :, :]  # (b,1, hxw,f)
-            to_save = attn
-        elif self.only_pos_prompt:
-            attn_shape = (
-                attn.shape
-            )  # (2*b*h, height*width, f), since we call this function during CFG it is 2*b and not b
-            attn = attn.reshape(
-                -1, 8, attn_shape[1], attn_shape[2]
-            )  # (2*b, h, height*width, f)
-            attn = attn[attn.shape[0] // 2 :, :, :, :]  # (b, h, hxw,f)
             to_save = attn
         else:
             to_save = attn  # (2*b*h, seq, f) where seq=height*width, and f=height*width or max seq len
@@ -618,440 +389,11 @@ class AttentionStore:
         is_cross = "attn2" in name
         return place_in_unet, is_cross
 
-    def plot_sum(self, mat, bg_image):
-        req_spatial_dim = 256
-        cm = plt.get_cmap("turbo")
-        bg_image = Image.fromarray(bg_image)
-        bg_image = bg_image.resize((req_spatial_dim, req_spatial_dim))
-        spatial_dim = int(np.sqrt(mat.shape[-1]))
-        col_sum = mat.sum(axis=0)  # sink attention
-        normalized = (col_sum - col_sum.min()) / (col_sum.max() - col_sum.min())
-        reshaped = normalized.reshape(spatial_dim, spatial_dim)
-        colored_image = cm(reshaped)
-        my_image = Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8))
-        my_image = my_image.resize(
-            (req_spatial_dim, req_spatial_dim), resample=Image.Resampling.NEAREST
-        )
-        blended = Image.blend(my_image, bg_image, 0.5)
-        return blended
-
-    def plot_ss(self, stochastic_mat, bg_image, threshold=False):
-        req_spatial_dim = 256
-        cm = plt.get_cmap("turbo")
-        bg_image = Image.fromarray(bg_image)
-        bg_image = bg_image.resize((req_spatial_dim, req_spatial_dim))
-        spatial_dim = int(np.sqrt(stochastic_mat.shape[-1]))
-        # compute steady state (ss @ mat = ss)
-        # rows are identical and are steady state
-        # columns should be constant and essentially meaningless...
-        # t1 = time.time()
-        steady_state1 = np.linalg.matrix_power(stochastic_mat, 20)[0, :]
-        # t2 = time.time()
-        # print("ss2: {}".format(t2-t1))
-        # another way to compute steady state
-        # values, vectors = np.linalg.eig(stochastic_mat.T)
-        # values = np.real(values)
-        # steady_state2 = np.real(vectors[:, np.real(values)==1.0])
-        # if (steady_state2 < 0).any():
-        #     # print("flippn'")
-        #     if not (steady_state2 < 0).all():
-        #         print("what?")
-        #     steady_state2 = steady_state2*-1
-        steady_state = steady_state1
-        # normalized1 = steady_state / np.linalg.norm(steady_state)
-        # normalized1 = (normalized1 - normalized1.min()) / (normalized1.max() - normalized1.min())
-        normalized2 = (steady_state - steady_state.min()) / (
-            steady_state.max() - steady_state.min()
-        )
-        if threshold:
-            normalized2 = (normalized2 > 0.5).astype(np.float32)
-        reshaped = normalized2.reshape(spatial_dim, spatial_dim)
-        colored_image = cm(reshaped)
-        my_image = Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8))
-        my_image = my_image.resize(
-            (req_spatial_dim, req_spatial_dim), resample=Image.Resampling.NEAREST
-        )
-        blended = Image.blend(my_image, bg_image, 0.5)
-        return blended
-
-    def viz_edit(self, gt_images, dst_path, seed_index, img_index, grid=True):
-        """
-        gt_images: (b, 512, 512, 3)
-        """
-        total_timesteps = len(self.attention_store[self.save_layer_names[0]])
-        if grid:
-            cur_path = Path(dst_path, "{:03}".format(img_index))
-            cur_path.mkdir(parents=True, exist_ok=True)
-        for i in range(total_timesteps):
-            print("timestep: {} / {}".format(i + 1, total_timesteps))
-            images = []
-            for ii, layer in enumerate(self.save_layer_names):
-                print("layer: {}".format(layer))
-                attmaps = np.array(
-                    self.attention_store[layer]
-                )  # (t, b, x, h*w, f) - x is either 8 or 1 (if heads were avged)
-                assert attmaps.shape[1] == 1
-                cur_attmap_batch = attmaps[i, 0]  # (x, h*w, f)
-                if not grid:
-                    cur_path = Path(dst_path, "{:03}".format(img_index))
-                    cur_path.mkdir(parents=True, exist_ok=True)
-                # per layer
-                layer_attmap = cur_attmap_batch.mean(axis=0)
-                reconstructed = self.edit_ss(layer_attmap[None, :, :]).cpu().numpy()[0]
-                image = self.plot_ss(reconstructed, gt_images[0])
-                if grid:
-                    images.append(image)
-                else:
-                    image.save(Path(cur_path, "l000_t{:03d}.png".format(i)))
-                # per head
-                if cur_attmap_batch.shape[0] > 1:
-                    for iii in range(cur_attmap_batch.shape[0]):
-                        cur_attmap = cur_attmap_batch[iii]
-                        reconstructed = (
-                            self.edit_ss(cur_attmap[None, :, :]).cpu().numpy()[0]
-                        )
-                        print(np.linalg.norm(cur_attmap - reconstructed))
-                        image = self.plot_ss(reconstructed, gt_images[0])
-                        if grid:
-                            images.append(image)
-                        else:
-                            image.save(
-                                Path(cur_path, "h{:03d}_t{:03d}.png".format(iii, i))
-                            )
-            if grid:
-                images_np = np.array([np.array(x) for x in images])
-                grid_image = gsoup.image_grid(images_np, len(self.save_layer_names), 9)
-                gsoup.save_image(
-                    grid_image, Path(cur_path, "grid_{:03d}.png".format(i))
-                )
-
-    def viz_col_sum(self, gt_images, dst_path, seed_index, img_index, grid=True):
-        """
-        gt_images: (b, 512, 512, 3)
-        """
-        total_timesteps = len(self.attention_store[self.save_layer_names[0]])
-        if grid:
-            cur_path = Path(dst_path, "{:03}".format(img_index))
-            cur_path.mkdir(parents=True, exist_ok=True)
-        for i in range(total_timesteps):
-            print("timestep: {} / {}".format(i + 1, total_timesteps))
-            images = []
-            for ii, layer in enumerate(self.save_layer_names):
-                print("layer: {}".format(layer))
-                attmaps = np.array(
-                    self.attention_store[layer]
-                )  # (t, b, x, h*w, f) - x is either 8 or 1 (if heads were avged)
-                assert attmaps.shape[1] == 1
-                cur_attmap_batch = attmaps[i, 0]  # (x, h*w, f)
-                if not grid:
-                    cur_path = Path(dst_path, "{:03}".format(img_index))
-                    cur_path.mkdir(parents=True, exist_ok=True)
-                # per layer
-                layer_attmap = cur_attmap_batch.mean(axis=0)
-                image = self.plot_sum(layer_attmap, gt_images[0])
-                if grid:
-                    images.append(image)
-                else:
-                    image.save(Path(cur_path, "l000_t{:03d}.png".format(i)))
-                # per head
-                if cur_attmap_batch.shape[0] > 1:
-                    for iii in range(cur_attmap_batch.shape[0]):
-                        cur_attmap = cur_attmap_batch[iii]
-                        image = self.plot_sum(cur_attmap, gt_images[0])
-                        if grid:
-                            images.append(image)
-                        else:
-                            image.save(
-                                Path(cur_path, "h{:03d}_t{:03d}.png".format(iii, i))
-                            )
-            if grid:
-                images_np = np.array([np.array(x) for x in images])
-                grid_image = gsoup.image_grid(images_np, len(self.save_layer_names), 9)
-                gsoup.save_image(
-                    grid_image, Path(cur_path, "grid_{:03d}.png".format(i))
-                )
-
-    def viz_steady_state(
-        self, gt_images, dst_path, seed_index, img_index, grid=True, threshold=False
-    ):
-        """
-        gt_images: (b, 512, 512, 3)
-        """
-        total_timesteps = len(self.attention_store[self.save_layer_names[0]])
-        if grid:
-            cur_path = Path(dst_path, "{:03}".format(img_index))
-            cur_path.mkdir(parents=True, exist_ok=True)
-        for i in range(total_timesteps):
-            print("timestep: {} / {}".format(i + 1, total_timesteps))
-            images = []
-            for ii, layer in enumerate(self.save_layer_names):
-                print("layer: {}".format(layer))
-                attmaps = np.array(
-                    self.attention_store[layer]
-                )  # (t, b, x, h*w, f) - x is either 8 or 1 (if heads were avged)
-                assert attmaps.shape[1] == 1
-                cur_attmap_batch = attmaps[i, 0]  # (x, h*w, f)
-                if not grid:
-                    cur_path = Path(dst_path, "{:03}".format(img_index), layer)
-                    cur_path.mkdir(parents=True, exist_ok=True)
-                # per layer
-                layer_attmap = cur_attmap_batch.mean(axis=0)
-                image = self.plot_ss(layer_attmap, gt_images[0], threshold)
-                if grid:
-                    images.append(image)
-                else:
-                    image.save(Path(cur_path, "l000_t{:03d}.png".format(i)))
-                # per head
-                if cur_attmap_batch.shape[0] > 1:
-                    for iii in range(cur_attmap_batch.shape[0]):
-                        cur_attmap = cur_attmap_batch[iii]
-                        image = self.plot_ss(cur_attmap, gt_images[0], threshold)
-                        if grid:
-                            images.append(image)
-                        else:
-                            image.save(
-                                Path(cur_path, "h{:03d}_t{:03d}.png".format(iii, i))
-                            )
-            if grid:
-                images_np = np.array([np.array(x) for x in images])
-                grid_image = gsoup.image_grid(images_np, len(self.save_layer_names), 9)
-                gsoup.save_image(
-                    grid_image, Path(cur_path, "grid_{:03d}.png".format(i))
-                )
-
-    def visualize_per_layer(self, gt_images, dst_path, nn=4):
-        """
-        gt_images: (b, 512, 512, 3)
-        """
-        grid_size = 16
-        target_pixels = np.array(
-            np.meshgrid(
-                np.linspace(0, 1, grid_size),
-                np.linspace(0, 1, grid_size),
-                indexing="xy",
-            )
-        )  # (2, grid_size, grid_size)
-        target_pixels = target_pixels[:, 1:-1, 1:-1]  # (2, grid_size-4, grid_size-4)
-        target_pixels = target_pixels.reshape(2, -1).transpose(1, 0)  # (n_grid, 2)
-        target_pixels = target_pixels.flatten()  # (n_grid*2)
-        ## todo fix: doesn't interpolate !
-        target_per_image_res = 256
-        pixels = np.array(target_pixels)
-        assert len(pixels) % 2 == 0
-        pixels[pixels < 0.0] = 0
-        pixels[pixels > 1.0] = 1.0
-        pixels = pixels.reshape(-1, 2)
-        for i, key in enumerate(self.attention_store.keys()):
-            print(
-                "plotting attmaps {} / {}".format(i, len((self.attention_store.keys())))
-            )
-            new_dst = Path(dst_path, key)
-            new_dst.mkdir(parents=True, exist_ok=True)
-            attmaps = np.array(
-                self.attention_store[key]
-            )  # new: (t, 1, head, hw, hw) old: (t, b, h*w, h*w or seq),  very_old: (t, 2*b*heads, h*w, h*w or seq)
-            attmaps = attmaps.mean(axis=2)  # avg over heads
-            orig_shape = attmaps.shape
-            # attmaps = attmaps.reshape(orig_shape[0], -1, 8, orig_shape[2], orig_shape[3])  # (t, 2*b, heads, h*w, h*w or seq)
-            # attmaps = attmaps[:, attmaps.shape[1]//2:, ...]  # (t, b, heads, h*w, h*w) take only positive prompt
-            spatial_dim = int(np.sqrt(orig_shape[-1]))
-            actual_pixels = np.round(pixels * spatial_dim).astype(np.int32)
-            for i, pixel in enumerate(actual_pixels):
-                if i != 121:  # 141 pumpkin, 121 lamp
-                    continue
-                # select a pixel
-                if nn == 0:
-                    neighbours = np.array([[0, 0]])
-                elif nn == 4:
-                    neighbours = np.array([[0, 0], [0, 1], [0, -1], [-1, 0], [1, 0]])
-                else:
-                    raise ValueError("nn should be 0 or 4")
-                neighbours = neighbours + pixel
-                # remove neighbours with negative values
-                neighbours = neighbours[(neighbours >= 0).all(axis=1)]
-                neighbours = neighbours[(neighbours < spatial_dim).all(axis=1)]
-                neighbour_indices = np.ravel_multi_index(
-                    tuple(neighbours.T), (spatial_dim, spatial_dim), order="F"
-                )
-                # pixel is written as xy cords, we want to pluck specific rows out
-                selected_pixel = attmaps[
-                    :, :, neighbour_indices, :
-                ]  # (t, b, n_neighbours+1, h*w), old:(t, b, h, n_neighbours+1, h*w)
-                selected_pixel = selected_pixel.mean(
-                    axis=2
-                )  # mean over neighbours (t, b, h*w)
-                # reshape into a sequence of images for each timestep
-                images = selected_pixel.reshape(
-                    -1, attmaps.shape[1], spatial_dim, spatial_dim
-                )  # (t, b, h, w)
-                # perhaps for plotting a region of interest
-                ### lamp
-                x1, y1 = 30, 8
-                width, height = 76, 74
-                ### pumpkin
-                # x1, y1 = 0, 79
-                # width, height = 51, 69
-                image_sdim = 256
-                region = np.sum(
-                    images[
-                        :,
-                        :,
-                        int(spatial_dim * y1 / image_sdim) : int(
-                            spatial_dim * (y1 + height) / image_sdim
-                        ),
-                        int(spatial_dim * x1 / image_sdim) : int(
-                            spatial_dim * (x1 + width) / image_sdim
-                        ),
-                    ],
-                    axis=(1, 2, 3),
-                )
-                np.save(Path(new_dst, "region.npy"), region)
-                selected_ts = np.array([10, 90])
-                images = images[selected_ts, ...]  # pluck only some t's...
-                images = images.transpose(1, 0, 2, 3)  # (b, t, h, w)
-                total_width = images.shape[1]
-                total_height = images.shape[0]
-                stacked_images = np.copy(images)
-                stacked_images = np.concatenate(
-                    stacked_images, axis=1
-                )  # (t, bxh, w), but t is huge...
-                image = np.hstack(stacked_images)  # (bxh, txw)
-                add_mean_image = False
-                if add_mean_image:
-                    mean_image = np.mean(images, axis=1)  # (b, h, w)
-                    mean_image = np.vstack(mean_image)  # (bxh, w)
-                    image = np.concatenate(
-                        (image, mean_image), axis=-1
-                    )  # (bxh, tx(w+1))
-                    total_width += 1
-                # tonemap
-                image = (image - image.min()) / (image.max() - image.min() + 1e-6)
-                # image = image / (image + 1.0)
-                # make it colorful
-                cm = plt.get_cmap("jet")
-                colored_image = cm(image)
-                # resize the stack of images to target_per_image_resxtarget_per_image_res each
-                my_image = Image.fromarray(
-                    (colored_image[:, :, :3] * 255).astype(np.uint8)
-                )
-                my_image = my_image.resize(
-                    (
-                        target_per_image_res * total_width,
-                        target_per_image_res * total_height,
-                    ),
-                    resample=Image.Resampling.NEAREST,
-                )
-                # concatenate the orig images to the left
-                my_image = np.asarray(my_image, dtype=np.float64) / 255
-                gt_images_resized = [Image.fromarray(x) for x in gt_images]
-                gt_images_resized = np.array(
-                    [
-                        x.resize((target_per_image_res, target_per_image_res))
-                        for x in gt_images_resized
-                    ]
-                ).reshape(-1, target_per_image_res, 3)
-                gt_images_resized = gsoup.to_float(gt_images_resized)
-                colored_image = np.hstack([gt_images_resized, my_image])
-                my_image = Image.fromarray(
-                    (colored_image[:, :, :3] * 255).astype(np.uint8)
-                )
-                my_image2 = Image.fromarray(
-                    (
-                        np.tile(gt_images_resized, (1, (total_width + 1), 1)) * 255
-                    ).astype(np.uint8)
-                )
-                blended = Image.blend(my_image, my_image2, 0.2)
-                # add points where the pixel is
-                draw = ImageDraw.Draw(blended)
-                # draw expects x,y coordinates
-                mypixel = np.round(pixels[i] * target_per_image_res).astype(np.int32)
-                for j in range(total_height):
-                    draw.circle(
-                        (mypixel[0], mypixel[1] + j * target_per_image_res),
-                        radius=target_per_image_res // 64,
-                        fill="#00ff00",
-                    )
-                    # draw.point((mypixel[0], mypixel[1]+j*target_per_image_res), 'green')
-                    # draw.ellipse((mypixel[0]-10, mypixel[1]-10+j*target_per_image_res,
-                    #             mypixel[0]+10, mypixel[1]+10+j*target_per_image_res), outline ='green', width=2)
-                ####### per timestep image
-                blended = np.array(blended)
-                blended_array = np.split(blended, len(selected_ts) + 1, axis=1)
-                for ii, b in enumerate(blended_array):
-                    gsoup.save_image(
-                        b, Path(new_dst, "pixels_{:03d}_{:03d}.png".format(i, ii))
-                    )
-                ####### per timestep image
-                ####### all timestep image
-                # blended.save(Path(new_dst, "pixels_{:03d}.png".format(i)))
-
     def between_steps(self):
         """
         will be called after all attention layers were called
         """
-        # save the current pass in the internal dictionary
-        # self.attention_store = self.step_store
-        # if not self.per_timestamp:
-        # if self.save_global_store:
-        #     with torch.no_grad():
-        #         if len(self.global_store) == 0:
-        #             self.global_store = self.step_store
-        #         else:
-        #             for key in self.global_store:
-        #                 for i in range(len(self.global_store[key])):
-        #                     self.global_store[key][i] += self.step_store[key][i].detach()
-
-        # self.step_store = self.get_empty_store()
-
-    def pca_store(self, n_componenets=3):
-        per_layer_pca = {}
-        for layer in self.save_layer_names:
-            print(layer)
-            data = np.vstack(
-                self.attention_store[layer]
-            )  # new: t, head, h, w ||| old: t, b, hxw, f
-            # data = data.reshape(data.shape[0], -1, data.shape[-1]) # old: t, bxhxw, f
-            data = data.transpose(0, 2, 1, 3)  # t, h, head, w
-            data = data.reshape(data.shape[0], data.shape[1], -1)  # t, h, headxw
-            # data = data.reshape(data.shape[0], data.shape[1]*data.shape[2], -1)  # t, headxh, w
-            per_timestamp_basis = []
-            per_timestamp_basis_mean = []
-            per_timestamp_comps = []
-            for t in range(data.shape[0]):
-                print(t)
-                pca = PCA(n_components=n_componenets)
-                pca.fit(data[t])
-                # see https://stackoverflow.com/questions/36566844/pca-projection-and-reconstruction-in-scikit-learn
-                basis = pca.components_  # (components, f)
-                basis_mean = pca.mean_  #  (f, )
-                # basis = basis.reshape(spatial_dim, spatial_dim, n_componenets)
-                # per_timestamp_basis.append(basis)
-                # per_timestamp_basis_mean.append(basis_mean)
-                per_timestamp_comps.append(pca.transform(data[t]))
-            per_layer_pca[layer] = np.array(per_timestamp_comps)
-        return per_layer_pca  # , np.array(per_timestamp_basis), np.array(per_timestamp_basis_mean),
-
-    def do_pca_viz(self, pcas, dst_path):
-        # pcas is (t, hxw, 3)
-        for layer, pcas in pcas.items():
-            layer_path = Path(dst_path, layer)
-            layer_path.mkdir(parents=True, exist_ok=True)
-            for i, pca in enumerate(pcas):
-                spatial_dim = int(np.sqrt(pca.shape[0]))
-                req_spatial_dim = 256
-                # cm = plt.get_cmap('turbo')
-                # bg_image = Image.fromarray(orig_image)
-                # bg_image = bg_image.resize((req_spatial_dim, req_spatial_dim))
-                normalized = (pca - pca.min()) / (pca.max() - pca.min())
-                reshaped = normalized.reshape(spatial_dim, spatial_dim, 3)
-                # colored_image = cm(reshaped)
-                my_image = Image.fromarray((reshaped * 255).astype(np.uint8))
-                my_image = my_image.resize(
-                    (req_spatial_dim, req_spatial_dim),
-                    resample=Image.Resampling.NEAREST,
-                )
-                # blended = Image.blend(my_image, bg_image, 0.5)
-                my_image.save(Path(layer_path, "{:03d}.png".format(i)))
+        pass
 
     def get_store(self):
         return self.attention_store
@@ -1163,12 +505,12 @@ class PLProcessor:
                 self.key, value_tag.device
             )
         if valid:
-            if self.args.inference_store_attention_value == "query":
+            if self.args.inject_value == "query":
                 query_tag = features
                 attention_probs = self.get_attention_scores(
                     query_tag, key_tag, attention_mask
                 )
-            elif self.args.inference_store_attention_value == "weight":
+            elif self.args.inject_value == "weight":
                 attention_probs = features  # (2*b*h, seq, seq)
             else:
                 raise NotImplementedError
@@ -1177,9 +519,9 @@ class PLProcessor:
                 query_tag, key_tag, attention_mask
             )
         if self.attention_store is not None:
-            if self.args.inference_store_attention_value == "query":
+            if self.args.inject_value == "query":
                 self.attention_store(query_tag, self.key, False)
-            elif self.args.inference_store_attention_value == "weight":
+            elif self.args.inject_value == "weight":
                 self.attention_store(attention_probs, self.key, False)
             else:
                 raise NotImplementedError
@@ -2522,26 +1864,10 @@ class PLPipeline(
                     ###### END: lora readout
                 ########## END: original diffusion prediciton (+CFG)
                 # compute the previous noisy sample x_t -> x_t-1
-                if ddpmi:
-                    idx = (
-                        self.scheduler.num_inference_steps
-                        - t_to_idx[int(t)]
-                        - (self.scheduler.num_inference_steps - zs.shape[0] + 1)
-                    )
-                    z = zs[idx : idx + 1]
-                    latents = reverse_step(
-                        self,
-                        noise_pred,
-                        t,
-                        latents,
-                        device=device,
-                        eta=1.0,
-                        variance_noise=z,
-                    )
-                else:
-                    latents = self.scheduler.step(
-                        noise_pred, t, latents, **extra_step_kwargs, return_dict=False
-                    )[0]
+                
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}

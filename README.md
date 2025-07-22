@@ -2,12 +2,17 @@
 
 [Project Page](https://yoterel.github.io/practi_light-project-page/) | [Paper]() | [Supplementary]()
 
+## Dependencies
+ intrinsic decomposition
+ controlnet
+ diffusers
+ transformers
+ torch
+ yaml
+
 ## Usage
 
-
-### Demos
-
-
 ## Todos
-- [] Basic functionality
+- [] Manual illumination
+- [] Automatic illumination
 - [] Reproduction of experiments
