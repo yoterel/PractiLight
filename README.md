@@ -24,5 +24,6 @@ A simple animation to show how to create a control signal in Blender 3.6:
 
 ## Todos
 - [x] Manual illumination
+- [ ] Support sequence of control signals (from folder)
 - [ ] Automatic illumination
 - [ ] Reproduction of experiments
