@@ -24,7 +24,7 @@ Here is an example animation showing how to create a control signal in Blender 3
 
 ![example](https://github.com/yoterel/practi_light/blob/main/resource/example.gif)
 
-You can swap the light type, and change the roughness in the node editor.
+You can swap the light type, and change the roughness in the node editor. In fact, this way of creating a control signal is just a suggestion. Feel free to use any input as control. For better results it should resemble a direct irradiance map (this is Blender's output in the above example).
 
 ## 
 
