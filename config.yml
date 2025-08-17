@@ -1,6 +1,6 @@
 output_dir: "output/test"
 pretrained_model_name_or_path: "stable-diffusion-v1-5/stable-diffusion-v1-5"
-cache_dir: "/CT/ObjectInjection/work/light_transport_diffuse/models"
+cache_dir: "./models"
 control_signal: ./output/test/control.png
 seed: 8
 mode: null
@@ -9,7 +9,7 @@ cfg_scale: 8.5
 prompt: "a silver teapot on a wooden table. intricate."
 prompt_negative: "artifacts, slow, ugly, blurry, deformed, multiple limbs, pixelated, static, fog, flat, unclear, distorted, error, still, low resolution, oversaturated, grain, blur, morhping, warping"
 num_steps: 100
-folder_to_load_lora_checkpoint: ["/CT/ObjectInjection/work/light_transport_diffuse/output/train/images_41441201"]
+folder_to_load_lora_checkpoint: ["./checkpoints"]
 lora_checkpoint_index: [-1]  # -1 for using latest checkpoint
 lora_guidance_scale: 2.0  # scale for guidance
 adaptive_guidance: False

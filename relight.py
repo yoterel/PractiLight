@@ -140,7 +140,7 @@ def main():
     lora_names = []
     for i, lora_exp_checkpoint in enumerate(args.folder_to_load_lora_checkpoint):
         dirs = [
-            d for d in sorted(Path("output", lora_exp_checkpoint).glob("checkpoint*"))
+            d for d in sorted(Path(lora_exp_checkpoint).glob("checkpoint*"))
         ]
         dirs = sorted(dirs, key=lambda x: int(x.stem.split("-")[1]))
         lora_weights_path = None
