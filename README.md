@@ -1,4 +1,4 @@
-[Project Page](https://yoterel.github.io/PractiLight-project-page/) | [Paper]() | [Supplementary]()
+[Project Page](https://yoterel.github.io/PractiLight-project-page/) | [Paper](https://arxiv.org/abs/2509.01837)
 
 # PractiLight
 PractiLight offers a light-weight solution for relighting a prompt-generated image using a simple control signal - direct illumination.
