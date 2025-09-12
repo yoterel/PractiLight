@@ -51,3 +51,18 @@ Which will generate the relit result.
 - [ ] Support sequence of control signals (from folder)
 - [ ] Automatic illumination
 - [ ] Reproduction of dataset / benchmark
+
+## 🎓 Citation
+If you find our work useful, please consider giving a star ⭐ and a citation.
+
+```bibtex
+@misc{erel2025practilightpracticallightcontrol,
+      title={PractiLight: Practical Light Control Using Foundational Diffusion Models}, 
+      author={Yotam Erel and Rishabh Dabral and Vladislav Golyanik and Amit H. Bermano and Christian Theobalt},
+      year={2025},
+      eprint={2509.01837},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2509.01837}, 
+}
+```
